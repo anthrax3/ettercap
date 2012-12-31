@@ -61,6 +61,7 @@
       z.len = 64;                   \
       z.L4.flags = TH_RST;          \
       packet_disp_data(&z, z.DATA.data, z.DATA.len); \
+      DEBUG_MSG("Breaking on error"); \
       sslw_parse_packet(y, SSL_SERVER, &z); \
       sslw_wipe_connection(y);      \
       SAFE_FREE(z.DATA.data);       \
@@ -146,9 +147,11 @@ static int sslw_write_data(struct accepted_entry *ae, u_int32 direction, struct 
 static void sslw_wipe_connection(struct accepted_entry *ae);
 static void sslw_init(void);
 static void sslw_initialize_po(struct packet_object *po, u_char *p_data);
+#ifndef OS_LINUX
 static int sslw_match(void *id_sess, void *id_curr);
 static void sslw_create_session(struct ec_session **s, struct packet_object *po);
 static size_t sslw_create_ident(void **i, struct packet_object *po);            
+#endif
 static void sslw_hook_handled(struct packet_object *po);
 static X509 *sslw_create_selfsigned(X509 *serv_cert);
 static int sslw_insert_redirect(u_int16 sport, u_int16 dport);
@@ -350,27 +353,39 @@ EC_THREAD_FUNC(sslw_start)
  */
 static void sslw_hook_handled(struct packet_object *po)
 {
-   struct ec_session *s = NULL;
-
+ 
    /* We have nothing to do with this packet */
    if (!sslw_is_ssl(po))
       return;
-      
+
    /* If it's an ssl packet don't forward */
    po->flags |= PO_DROPPED;
+   char tmp[MAX_ASCII_ADDR_LEN];
+   char tmp1[MAX_ASCII_ADDR_LEN];
+   DEBUG_MSG("NOT FORWARDING %s %d %s %d", ip_addr_ntoa(&po->L3.src, tmp), ntohs(po->L4.src),
+                                           ip_addr_ntoa(&po->L3.dst, tmp1), ntohs(po->L4.dst));
    
    /* If it's a new connection */
    if ( (po->flags & PO_FORWARDABLE) && 
         (po->L4.flags & TH_SYN) &&
         !(po->L4.flags & TH_ACK) ) {
-	
+
+#ifndef OS_LINUX	
+     /* On Linux we do not need to create a session
+      * as we can get the original destination using socket options */
+      struct ec_session *s = NULL;
       sslw_create_session(&s, PACKET);
 
       /* Remember the real destination IP */
       memcpy(s->data, &po->L3.dst, sizeof(struct ip_addr));
       session_put(s);
-   } else /* Pass only the SYN for conntrack */
+#endif
+   } else {
+      /* Pass only the SYN for conntrack */
       po->flags |= PO_IGNORE;
+      DEBUG_MSG("IGNORING %s %d %s %d", ip_addr_ntoa(&po->L3.src, tmp), ntohs(po->L4.src),
+                                           ip_addr_ntoa(&po->L3.dst, tmp1), ntohs(po->L4.dst));
+   }
 }
 
 /*
@@ -736,7 +751,7 @@ static int sslw_get_peer(struct accepted_entry *ae)
    SAFE_FREE(s->data);
    SAFE_FREE(s);
    SAFE_FREE(ident);
-#else
+#else /* OS_LINUX */
    struct sockaddr_in sa_in;
    socklen_t sa_in_sz = sizeof(struct sockaddr_in);
 
@@ -859,18 +874,22 @@ static int sslw_write_data(struct accepted_entry *ae, u_int32 direction, struct 
    do {
       not_written = 0;
       /* Write packet data */
-      if (ae->status & SSL_ENABLED)
+      if (ae->status & SSL_ENABLED) {
          len = SSL_write(ae->ssl[direction], p_data, packet_len);
-      else       
+	 DEBUG_MSG("SSL ENABLED LEN: %d", len);
+      } else {
          //len = socket_send(ae->fd[direction], p_data, packet_len);
          len = write(ae->fd[direction], p_data, packet_len);
+         DEBUG_MSG("NON SSL LEN: %d", len);
+      }
 
       if (len <= 0 && (ae->status & SSL_ENABLED)) {
          ret_err = SSL_get_error(ae->ssl[direction], len);
-         if (ret_err == SSL_ERROR_WANT_READ || ret_err == SSL_ERROR_WANT_WRITE)
+         if (ret_err == SSL_ERROR_WANT_READ || ret_err == SSL_ERROR_WANT_WRITE) {
             not_written = 1;
-         else
+         } else {
             return -EINVALID;
+	 }
       }
 
       if (len < 0 && !(ae->status & SSL_ENABLED)) {
@@ -1140,6 +1159,7 @@ EC_THREAD_FUNC(sslw_child)
 
          ret_val = sslw_read_data(ae, direction, &po);
          BREAK_ON_ERROR(ret_val,ae,po);
+         DEBUG_MSG("Read from direction %d %s", direction, po.DATA.data);
 	 
          /* if we have data to read */
          if (ret_val == ESUCCESS) {
@@ -1150,6 +1170,7 @@ EC_THREAD_FUNC(sslw_child)
 
             ret_val = sslw_write_data(ae, !direction, &po);
             BREAK_ON_ERROR(ret_val,ae,po);
+	    DEBUG_MSG("WRote to direction %d %s", !direction, po.DATA.data);
 	    
             if ((po.flags & PO_SSLSTART) && !(ae->status & SSL_ENABLED)) {
                ae->status |= SSL_ENABLED; 
@@ -1175,6 +1196,7 @@ EC_THREAD_FUNC(sslw_child)
 }
 
 
+#ifndef OS_LINUX
 /*******************************************/
 /* Sessions' stuff for ssl packets */
 
@@ -1248,6 +1270,7 @@ static void sslw_create_session(struct ec_session **s, struct packet_object *po)
    /* alloc of data elements */
    SAFE_CALLOC((*s)->data, 1, sizeof(struct ip_addr));
 }
+#endif /* OS_LINUX */
 #endif /* HAVE_OPENSSL */
 
 /* EOF */

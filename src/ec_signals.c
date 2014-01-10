@@ -66,9 +66,9 @@ void signal_handler(void)
 #ifdef SIGTERM
    signal_handle(SIGTERM, signal_TERM, 0);
 #endif
-#ifdef SIGCHLD
+/*#ifdef SIGCHLD
    signal_handle(SIGCHLD, signal_CHLD, 0);
-#endif
+#endif*/
 #ifdef SIGPIPE
    /* needed by sslwrap */
    signal_handle(SIGPIPE, SIG_IGN, 0);
@@ -236,7 +236,7 @@ static void signal_CHLD(int sig)
    (void) sig;
 #ifndef OS_WINDOWS
    int stat;
-   
+   DEBUG_MSG("Signal handler... (caught SIGNAL: from child) %d", sig);
    /* wait for the child to return and not become a zombie */
    while (waitpid (-1, &stat, WNOHANG) > 0);
 #endif
